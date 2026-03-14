@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)",
+      "Read(.env*)",
+      "Read(*.pem)",
+      "Read(credentials*)",
+      "Read(*secret*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": ".claude/hooks/pre-tool-security.sh"
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+# Vitals provenance data
+.vitals/
+
+# IDE
+.idea/
+
+# Python
+__pycache__/
+*.pyc

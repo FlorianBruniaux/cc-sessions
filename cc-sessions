@@ -361,41 +361,53 @@ def save_index(index: Dict[str, Dict]):
 
 def cmd_search(keyword: str, project_dirs: List[Path], limit: int = 10,
                since: Optional[str] = None, branch: Optional[str] = None,
-               json_output: bool = False):
+               json_output: bool = False, deep: bool = False):
     """Search sessions by keyword."""
     # Build/update index
     existing = load_index()
     index = build_index(project_dirs, existing)
     save_index(index)
 
-    # Filter
-    matches = []
+    # Filter candidates (index-based: project, date, branch)
     since_dt = parse_duration(since) if since else None
+    candidates = []
 
     for entry in index.values():
-        # Filter by project
         if not any(entry['project'] == d.name for d in project_dirs):
             continue
-
-        # Filter by keyword (case-insensitive in context)
-        if keyword.lower() not in entry['context'].lower():
-            continue
-
-        # Filter by date
         if since_dt:
-            entry_dt = datetime.fromisoformat(entry['timestamp'])
-            if entry_dt < since_dt:
+            if datetime.fromisoformat(entry['timestamp']) < since_dt:
                 continue
-
-        # Filter by branch
         if branch and entry['branch'] != branch:
             continue
+        candidates.append(entry)
 
-        matches.append(entry)
+    # Match keyword
+    kw = keyword.lower()
+    matches = []
+
+    if deep:
+        print(f"Scanning {len(candidates)} sessions…", file=sys.stderr)
+        for entry in candidates:
+            filepath = session_filepath(entry)
+            all_msgs = extract_all_user_messages(filepath)
+            matched_msg = next((m for m in all_msgs if kw in m.lower()), None)
+            if matched_msg:
+                result = dict(entry)
+                result['matched_message'] = matched_msg[:200]
+                matches.append(result)
+    else:
+        for entry in candidates:
+            if kw in entry['context'].lower():
+                matches.append(entry)
 
     # Sort by timestamp desc
     matches.sort(key=lambda x: x['timestamp'], reverse=True)
     matches = matches[:limit]
+
+    if not matches and not deep:
+        print(f"No results. Try --deep to search all messages.", file=sys.stderr)
+        return
 
     # Output
     if json_output:
@@ -403,7 +415,8 @@ def cmd_search(keyword: str, project_dirs: List[Path], limit: int = 10,
     else:
         for m in matches:
             dt = datetime.fromisoformat(m['timestamp'])
-            print(f"{dt.strftime('%Y-%m-%d %H:%M')}  {m['id']}  {m['branch']:12}  \"{m['context']}\"")
+            display = m.get('matched_message', m['context'])
+            print(f"{dt.strftime('%Y-%m-%d %H:%M')}  {m['id']}  {m['branch']:12}  \"{display}\"")
 
 
 def cmd_recent(project_dirs: List[Path], limit: int = 10, json_output: bool = False):
@@ -432,22 +445,7 @@ def cmd_recent(project_dirs: List[Path], limit: int = 10, json_output: bool = Fa
 
 def cmd_info(session_id: str):
     """Show session details."""
-    # Match partial ID
-    index = load_index()
-
-    matches = [s for s in index.values() if s['id'].startswith(session_id)]
-
-    if not matches:
-        print(f"Error: Session not found: {session_id}", file=sys.stderr)
-        sys.exit(1)
-
-    if len(matches) > 1:
-        print(f"Error: Ambiguous ID, multiple matches:", file=sys.stderr)
-        for m in matches:
-            print(f"  {m['id']}", file=sys.stderr)
-        sys.exit(1)
-
-    session = matches[0]
+    session = resolve_session_id(session_id)
     dt = datetime.fromisoformat(session['timestamp'])
 
     print(f"Session: {session['id']}")
@@ -459,9 +457,18 @@ def cmd_info(session_id: str):
 
 def cmd_resume(session_id: str):
     """Resume a session."""
-    # Match partial ID
-    index = load_index()
+    session = resolve_session_id(session_id)
+    os.execvp('claude', ['claude', '--resume', session['id']])
 
+
+def session_filepath(session: Dict) -> Path:
+    """Reconstruct the JSONL filepath from an index entry."""
+    return CLAUDE_DIR / "projects" / session['project'] / f"{session['id']}.jsonl"
+
+
+def resolve_session_id(session_id: str) -> Dict:
+    """Resolve a partial session ID to a full index entry. Exits on error."""
+    index = load_index()
     matches = [s for s in index.values() if s['id'].startswith(session_id)]
 
     if not matches:
@@ -474,10 +481,65 @@ def cmd_resume(session_id: str):
             print(f"  {m['id']}", file=sys.stderr)
         sys.exit(1)
 
-    full_id = matches[0]['id']
+    return matches[0]
 
-    # exec claude --resume
-    os.execvp('claude', ['claude', '--resume', full_id])
+
+def cmd_context(session_id: str, messages: int = 5, json_output: bool = False):
+    """Show the first N significant user messages of a session."""
+    session = resolve_session_id(session_id)
+    filepath = session_filepath(session)
+
+    all_messages = extract_all_user_messages(filepath)
+    preview = all_messages[:messages]
+
+    if not preview:
+        print("No significant messages found.", file=sys.stderr)
+        sys.exit(1)
+
+    if json_output:
+        print(json.dumps({
+            "id": session['id'],
+            "project": session['project'],
+            "branch": session['branch'],
+            "timestamp": session['timestamp'],
+            "messages": preview,
+        }, indent=2))
+    else:
+        dt = datetime.fromisoformat(session['timestamp'])
+        print(f"Session: {session['id']}")
+        print(f"Date:    {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Project: {session['project']}  Branch: {session['branch']}")
+        print()
+        for i, msg in enumerate(preview, 1):
+            truncated = msg[:200] + ("…" if len(msg) > 200 else "")
+            print(f"[{i}] {truncated}")
+            print()
+
+
+def cmd_last(project_dirs: List[Path], json_output: bool = False):
+    """Resume the most recent session in the current project."""
+    existing = load_index()
+    index = build_index(project_dirs, existing)
+    save_index(index)
+
+    sessions = [e for e in index.values()
+                if any(e['project'] == d.name for d in project_dirs)]
+    sessions.sort(key=lambda x: x['timestamp'], reverse=True)
+
+    if not sessions:
+        print("Error: No sessions found", file=sys.stderr)
+        sys.exit(1)
+
+    session = sessions[0]
+    dt = datetime.fromisoformat(session['timestamp'])
+
+    if json_output:
+        print(json.dumps(session, indent=2))
+        return
+
+    print(f"{dt.strftime('%Y-%m-%d %H:%M')}  {session['id']}  {session['branch']:12}  \"{session['context']}\"")
+    print()
+    os.execvp('claude', ['claude', '--resume', session['id']])
 
 
 def cmd_reindex():
@@ -1135,6 +1197,8 @@ def main():
     search_parser.add_argument('--limit', type=int, default=10, help="Max results")
     search_parser.add_argument('--since', help="Filter by date (7d, 30d, or ISO date)")
     search_parser.add_argument('--branch', help="Filter by git branch")
+    search_parser.add_argument('--deep', action='store_true',
+                               help="Search all messages, not just the opening one (slower)")
 
     # recent
     recent_parser = subparsers.add_parser('recent', help="Show recent sessions")
@@ -1147,6 +1211,15 @@ def main():
     # resume
     resume_parser = subparsers.add_parser('resume', help="Resume a session")
     resume_parser.add_argument('session_id', help="Session ID (partial match)")
+
+    # last
+    subparsers.add_parser('last', help="Resume the most recent session")
+
+    # context
+    context_parser = subparsers.add_parser('context', help="Preview first N messages of a session")
+    context_parser.add_argument('session_id', help="Session ID (partial match)")
+    context_parser.add_argument('--messages', type=int, default=5,
+                                help="Number of messages to show (default: 5)")
 
     # reindex
     subparsers.add_parser('reindex', help="Force rebuild index")
@@ -1180,7 +1253,7 @@ def main():
     args = parser.parse_args()
 
     # Get project dirs
-    if args.command in ['search', 'recent', 'discover']:
+    if args.command in ['search', 'recent', 'last', 'discover']:
         project_dirs = get_project_dirs(args.all)
 
         if not project_dirs:
@@ -1193,9 +1266,13 @@ def main():
 
     # Execute command
     if args.command == 'search':
-        cmd_search(args.keyword, project_dirs, args.limit, args.since, args.branch, args.json)
+        cmd_search(args.keyword, project_dirs, args.limit, args.since, args.branch, args.json, args.deep)
     elif args.command == 'recent':
         cmd_recent(project_dirs, args.limit, args.json)
+    elif args.command == 'last':
+        cmd_last(project_dirs, args.json)
+    elif args.command == 'context':
+        cmd_context(args.session_id, args.messages, args.json)
     elif args.command == 'info':
         cmd_info(args.session_id)
     elif args.command == 'resume':

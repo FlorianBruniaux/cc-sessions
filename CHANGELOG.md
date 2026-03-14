@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0] - 2026-03-14
+
+### Added
+
+- `last`: resume the most recent session in the current project (or `--all` for global most recent)
+- `context <id>`: preview the first N significant user messages of a session before resuming — accepts partial ID, `--messages N` flag, `--json` output
+- `search --deep`: bypass the index and scan all user messages in session files; slower but finds matches anywhere in the conversation, not just the opening message
+- Hint on empty `search` results: suggests `--deep` automatically
+
+### Changed
+
+- `cmd_info` and `cmd_resume` refactored to use shared `resolve_session_id()` helper (no behavior change)
+- New `session_filepath()` helper centralizes JSONL path reconstruction
+
 ## [1.0.0] - 2026-03-13
 
 ### Added
