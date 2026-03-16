@@ -287,43 +287,68 @@ def extract_all_user_messages(filepath: Path) -> List[str]:
     return messages
 
 
-def parse_session(filepath: Path) -> Optional[Dict]:
-    """Extract session metadata."""
+def parse_session(filepath: Path, mtime: float = None) -> Optional[Dict]:
+    """Extract session metadata — single file read."""
     session_id = filepath.stem
 
     # Skip subagent sessions
     if session_id.startswith('agent-'):
         return None
 
-    mtime = filepath.stat().st_mtime
-    context = get_first_user_message(filepath)
+    if mtime is None:
+        mtime = filepath.stat().st_mtime
 
-    if not context:
-        return None
-
-    # Extract branch from gitBranch field in JSONL
+    context = None
     branch = "unknown"
+
+    need_branch = True
+    need_context = True
     try:
         with open(filepath, 'r') as f:
             for line in f:
-                if not line.strip():
+                # Skip blank lines without allocating a stripped copy
+                if len(line) < 2:
                     continue
+
+                # Pre-filter: skip JSON parsing if line can't satisfy either need
+                has_branch = need_branch and '"gitBranch"' in line
+                has_user = need_context and '"user"' in line
+                if not has_branch and not has_user:
+                    continue
+
                 try:
                     entry = json.loads(line)
-                    git_branch = entry.get('gitBranch')
-                    if git_branch:
-                        branch = git_branch
+
+                    # Extract branch from first gitBranch field seen
+                    if has_branch:
+                        git_branch = entry.get('gitBranch')
+                        if git_branch:
+                            branch = git_branch
+                            need_branch = False
+
+                    # Extract context from first significant user message
+                    if has_user and entry.get('type') == 'user':
+                        msg = entry.get('message')
+                        content = msg.get('content', '') if msg else ''
+                        if isinstance(content, str) and not content.startswith('<'):
+                            context = content[:60].replace('\n', ' ')
+                            need_context = False
+
+                    # Stop early once we have both
+                    if not need_branch and not need_context:
                         break
+
                 except json.JSONDecodeError:
                     continue
     except Exception:
         pass
 
-    project = filepath.parent.name
+    if not context:
+        return None
 
     return {
         "id": session_id,
-        "project": project,
+        "project": filepath.parent.name,
         "mtime": mtime,
         "branch": branch,
         "context": context,
@@ -336,20 +361,27 @@ def build_index(project_dirs: List[Path], existing_index: Dict[str, Dict]) -> Di
     index = existing_index.copy()
 
     for project_dir in project_dirs:
-        jsonl_files = list(project_dir.glob("*.jsonl"))
+        try:
+            entries = os.scandir(project_dir)
+        except OSError:
+            continue
 
-        for filepath in jsonl_files:
-            session_id = filepath.stem
-            file_mtime = filepath.stat().st_mtime
+        with entries:
+            for entry in entries:
+                if not entry.name.endswith('.jsonl'):
+                    continue
 
-            # Skip if already indexed and not modified
-            if session_id in index and index[session_id]['mtime'] >= file_mtime:
-                continue
+                session_id = entry.name[:-6]  # strip .jsonl
+                file_mtime = entry.stat().st_mtime
 
-            # Parse session
-            session = parse_session(filepath)
-            if session:
-                index[session_id] = session
+                # Skip if already indexed and not modified
+                if session_id in index and index[session_id]['mtime'] >= file_mtime:
+                    continue
+
+                # Parse session — pass mtime to avoid second stat() call
+                session = parse_session(Path(entry.path), mtime=file_mtime)
+                if session:
+                    index[session_id] = session
 
     return index
 
