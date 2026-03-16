@@ -153,6 +153,70 @@ The categorization threshold is built into the scoring:
 
 `cc-sessions` positioning: Unix-style CLI, powerful filters, zero dependencies (Python stdlib only).
 
+## Autoresearch loops
+
+The `scripts/` directory contains performance optimization runners for iterative improvement of cc-sessions internals.
+
+### Setup
+
+```bash
+# Run a baseline measurement before making changes
+bash scripts/runner-reindex.sh    # cold reindex throughput
+bash scripts/runner-discover.sh   # discover speed on last 30 days
+bash scripts/runner-yield.sh      # parse yield (sessions with context / total)
+```
+
+### Loop A — Reindex throughput
+
+**Target**: `parse_session()` + `build_index()` (hot path on every search/recent call)
+
+**What it measures**: cold reindex time in seconds
+
+**Program**: `scripts/program-reindex.md`
+
+**Key optimization**: fuse the two file reads in `parse_session()` into one (branch + context in the same pass). Realistic gain: 30-50%.
+
+### Loop B — Discover speed
+
+**Target**: `discover_patterns()` clustering step (O(n²) Jaccard comparisons)
+
+**What it measures**: `discover --since 30d` wall time in seconds
+
+**Program**: `scripts/program-discover.md`
+
+**Key optimization**: replace O(n²) Jaccard clustering with sorted-token bucketing. Realistic gain: 50-80%.
+
+### Loop C — Parse yield
+
+**Target**: `get_first_user_message()` + `_is_system_injection()` filters
+
+**What it measures**: % of JSONL files that produce a non-empty context in the index
+
+**Program**: `scripts/program-yield.md`
+
+**Key optimization**: fall back to the next user message (up to 5 candidates) when the first is filtered, and tighten overly broad injection markers. Realistic gain: 5-15% more sessions indexed.
+
+### Running an optimization agent
+
+```bash
+# Isolated worktree to avoid polluting main branch
+git worktree add ../cc-sessions-autoresearch
+cd ../cc-sessions-autoresearch
+
+# Measure baseline
+bash scripts/runner-reindex.sh
+
+# Launch agent with the program instructions
+claude --dangerously-skip-permissions \
+  "$(cat scripts/program-reindex.md)"
+
+# Measure result
+bash scripts/runner-reindex.sh
+
+# Clean up if not keeping
+git worktree remove ../cc-sessions-autoresearch
+```
+
 ## Requirements
 
 - Python 3.8+

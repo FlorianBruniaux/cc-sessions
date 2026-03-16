@@ -128,6 +128,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -187,8 +188,18 @@ def get_project_dirs(all_projects: bool = False) -> List[Path]:
     return dirs
 
 
+_XML_SKIP_COMMANDS = frozenset({'/clear', '/exit', '/compact'})
+
+
 def get_first_user_message(filepath: Path) -> Optional[str]:
-    """Extract first significant user message from session JSONL."""
+    """Extract first significant user message from session JSONL.
+
+    Primary: first non-XML string user message.
+    Fallback: if the session only has XML messages, extract a skill/command
+    invocation name (e.g. "/eval-resource") as minimal context — only for
+    meaningful commands (not /clear, /exit, /compact).
+    """
+    fallback_cmd: Optional[str] = None
     try:
         with open(filepath, 'r') as f:
             for line in f:
@@ -209,6 +220,13 @@ def get_first_user_message(filepath: Path) -> Optional[str]:
 
                     # Rule 3: Not internal XML message
                     if content.startswith('<'):
+                        # Fallback: record command name if this is a skill invocation
+                        if fallback_cmd is None and '<command-name>' in content:
+                            m = re.search(r'<command-name>([^<]+)</command-name>', content)
+                            if m:
+                                cmd = m.group(1).strip()
+                                if cmd not in _XML_SKIP_COMMANDS:
+                                    fallback_cmd = cmd
                         continue
 
                     # Found significant user message
@@ -217,47 +235,53 @@ def get_first_user_message(filepath: Path) -> Optional[str]:
                     continue
     except Exception:
         pass
-    return None
+    return fallback_cmd
 
 
 def extract_all_user_messages(filepath: Path) -> List[str]:
     """Extract all significant user messages from a session JSONL file."""
     messages = []
     try:
-        with open(filepath, 'r') as f:
-            for line in f:
-                if not line.strip():
+        # Read whole file at once — one I/O call + one UTF-8 decode instead of line-by-line
+        raw = filepath.read_bytes().decode('utf-8', errors='replace')
+        for line in raw.split('\n'):
+            # Fast pre-filter: skip lines that can't be user messages
+            # before paying the json.loads cost (saves ~80% of JSON decodes)
+            if '"user"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+
+                if entry.get('type') != 'user':
                     continue
-                try:
-                    entry = json.loads(line)
 
-                    if entry.get('type') != 'user':
-                        continue
-
-                    content = entry.get('message', {}).get('content', '')
-
-                    if not isinstance(content, str):
-                        continue
-
-                    if content.startswith('<'):
-                        continue
-
-                    stripped = content.strip()
-
-                    # Skip very short messages (likely acknowledgements)
-                    if len(stripped) < 10:
-                        continue
-
-                    # Skip system-injected messages (compact summaries, reminders)
-                    # These are injected as plain-text user messages but aren't real user input
-                    if len(stripped) > 800:
-                        continue
-                    if _is_system_injection(stripped):
-                        continue
-
-                    messages.append(stripped)
-                except json.JSONDecodeError:
+                msg = entry.get('message')
+                if not msg:
                     continue
+                content = msg.get('content', '')
+
+                if not isinstance(content, str):
+                    continue
+
+                if content.startswith('<'):
+                    continue
+
+                stripped = content.strip()
+
+                # Skip very short messages (likely acknowledgements)
+                if len(stripped) < 10:
+                    continue
+
+                # Skip system-injected messages (compact summaries, reminders)
+                # These are injected as plain-text user messages but aren't real user input
+                if len(stripped) > 800:
+                    continue
+                if _is_system_injection(stripped):
+                    continue
+
+                messages.append(stripped)
+            except (json.JSONDecodeError, AttributeError):
+                continue
     except Exception:
         pass
     return messages
@@ -572,9 +596,9 @@ _SYSTEM_INJECTION_MARKERS = (
     'exiting plan mode',
     'task tools haven',
     'teamcreate tool team parallelize',
-    'florianbruniaux/.claude/projects',   # path fragments in compact prompts
-    'florianbruniaux/sites/',              # project path fragments
     '-users-florianbruniaux-',            # encoded path in compact messages
+    # Removed: 'florianbruniaux/sites/' — too broad, rejects legit messages mentioning ~/Sites/ projects
+    # Removed: 'florianbruniaux/.claude/projects' — same reason
 )
 
 
@@ -660,63 +684,73 @@ def collect_sessions_data(
     Collect {session_id, project, mtime, messages[]} for all sessions.
 
     Uses mtime-based cache to avoid re-reading unchanged files.
+    Cache-miss files are parsed in parallel (ThreadPoolExecutor) for I/O throughput.
     Returns one dict per session that has at least one user message.
     """
     cache = load_discover_cache()
-    updated_cache = {}
-    sessions_data = []
+    updated_cache: Dict = {}
+    sessions_data: List[Dict] = []
+
+    # Separate cache hits from misses in a first pass
+    cache_hits: List[Dict] = []
+    cache_misses: List[Tuple] = []  # (filepath, session_id, project_name, file_mtime)
 
     for project_dir in project_dirs:
         project_name = project_dir.name
-        jsonl_files = list(project_dir.glob("*.jsonl"))
-
-        for filepath in jsonl_files:
-            session_id = filepath.stem
-
-            # Skip subagent sessions
+        try:
+            dir_entries = list(os.scandir(project_dir))
+        except OSError:
+            continue
+        for entry in dir_entries:
+            if not entry.name.endswith('.jsonl'):
+                continue
+            session_id = entry.name[:-6]  # strip .jsonl
             if session_id.startswith('agent-'):
                 continue
-
             try:
-                file_mtime = filepath.stat().st_mtime
+                # DirEntry.stat() reuses the inode data from scandir — no extra syscall
+                file_mtime = entry.stat().st_mtime
             except OSError:
                 continue
+            filepath = Path(entry.path)
+            if since_dt and datetime.fromtimestamp(file_mtime) < since_dt:
+                continue
 
-            # Apply date filter: skip if file is older than since_dt
-            if since_dt:
-                file_dt = datetime.fromtimestamp(file_mtime)
-                if file_dt < since_dt:
-                    continue
-
-            # Cache hit: file unchanged since last analysis
             if session_id in cache and cache[session_id].get('mtime', 0) >= file_mtime:
-                entry = cache[session_id]
-                if entry.get('messages'):
+                cache_hits.append((session_id, project_name, file_mtime, cache[session_id]))
+            else:
+                cache_misses.append((filepath, session_id, project_name, file_mtime))
+
+    # Process cache hits immediately
+    for session_id, project_name, file_mtime, entry in cache_hits:
+        updated_cache[session_id] = entry
+        if entry.get('messages'):
+            sessions_data.append({
+                'session_id': session_id,
+                'project': project_name,
+                'mtime': file_mtime,
+                'messages': entry['messages'],
+            })
+
+    # Parse cache-miss files in parallel
+    def parse_one(args: Tuple) -> Tuple[str, str, float, List[str]]:
+        filepath, session_id, project_name, file_mtime = args
+        messages = extract_all_user_messages(filepath)
+        return session_id, project_name, file_mtime, messages
+
+    if cache_misses:
+        workers = min(64, len(cache_misses))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for session_id, project_name, file_mtime, messages in pool.map(parse_one, cache_misses):
+                cache_entry = {'id': session_id, 'mtime': file_mtime, 'messages': messages}
+                updated_cache[session_id] = cache_entry
+                if messages:
                     sessions_data.append({
                         'session_id': session_id,
                         'project': project_name,
                         'mtime': file_mtime,
-                        'messages': entry['messages'],
+                        'messages': messages,
                     })
-                updated_cache[session_id] = entry
-                continue
-
-            # Cache miss: parse file
-            messages = extract_all_user_messages(filepath)
-            cache_entry = {
-                'id': session_id,
-                'mtime': file_mtime,
-                'messages': messages,
-            }
-            updated_cache[session_id] = cache_entry
-
-            if messages:
-                sessions_data.append({
-                    'session_id': session_id,
-                    'project': project_name,
-                    'mtime': file_mtime,
-                    'messages': messages,
-                })
 
     save_discover_cache(updated_cache)
     return sessions_data
@@ -744,8 +778,23 @@ def discover_patterns(
     if total_sessions == 0:
         return []
 
-    # ── Step 1: Build per-session token lists and n-gram index ────────────────
-    # ngram_index: ngram_tuple -> list of {session_id, project, original_message}
+    # ── Step 1: Build per-session token lists and n-gram index (2-pass) ──────
+    # Pass 1: count n-grams only (no occurrence storage)
+    ngram_counts: Dict[Tuple, int] = defaultdict(int)
+
+    for sd in sessions_data:
+        for msg in sd['messages']:
+            tokens = normalize_text(msg)
+            if len(tokens) < 3:
+                continue
+            for n in range(3, 7):
+                for ngram in extract_ngrams(tokens, n):
+                    if all(t in _STOP_WORDS for t in ngram):
+                        continue
+                    ngram_counts[ngram] += 1
+
+    # Pass 2: build full index only for n-grams >= min_count
+    frequent_set = {ng for ng, c in ngram_counts.items() if c >= min_count}
     ngram_index: Dict[Tuple, List[Dict]] = defaultdict(list)
 
     for sd in sessions_data:
@@ -755,16 +804,14 @@ def discover_patterns(
             tokens = normalize_text(msg)
             if len(tokens) < 3:
                 continue
-            for n in range(3, 7):  # 3-6 word n-grams
+            for n in range(3, 7):
                 for ngram in extract_ngrams(tokens, n):
-                    # Filter n-grams that are all stop words (shouldn't happen after normalize)
-                    if all(t in _STOP_WORDS for t in ngram):
-                        continue
-                    ngram_index[ngram].append({
-                        'session_id': session_id,
-                        'project': project,
-                        'msg': msg[:80],
-                    })
+                    if ngram in frequent_set:
+                        ngram_index[ngram].append({
+                            'session_id': session_id,
+                            'project': project,
+                            'msg': msg[:80],
+                        })
 
     # ── Step 2: Filter n-grams below min_count ────────────────────────────────
     frequent_ngrams = {
@@ -794,24 +841,40 @@ def discover_patterns(
                 sub = ngram[i:i+n]
                 subsumed.add(sub)
 
-    # ── Step 4: Similarity clustering — merge near-duplicate phrases ──────────
-    # Group kept_ngrams by token overlap > 60%
+    # ── Step 4: Similarity clustering via bucketing O(n) ─────────────────────
+    # Pre-compute frozensets once
+    ng_sets = [frozenset(ng) for ng, _ in kept_ngrams]
+
+    def ngram_signature(ng_set: frozenset) -> tuple:
+        tokens = sorted(ng_set)
+        n = max(1, int(len(tokens) * 0.6))
+        return tuple(tokens[:n])
+
+    # Group by signature — only compare within each bucket
+    buckets: Dict[tuple, List[int]] = defaultdict(list)
+    for i, ng_set in enumerate(ng_sets):
+        buckets[ngram_signature(ng_set)].append(i)
+
     clusters: List[List[int]] = []
     assigned = set()
 
-    for i, (ng_i, _) in enumerate(kept_ngrams):
-        if i in assigned:
-            continue
-        cluster = [i]
-        for j, (ng_j, _) in enumerate(kept_ngrams):
-            if j <= i or j in assigned:
+    for bucket_indices in buckets.values():
+        for pos_i, i in enumerate(bucket_indices):
+            if i in assigned:
                 continue
-            overlap = token_overlap(list(ng_i), list(ng_j))
-            if overlap > 0.6:
-                cluster.append(j)
-                assigned.add(j)
-        clusters.append(cluster)
-        assigned.add(i)
+            cluster = [i]
+            set_i = ng_sets[i]
+            for j in bucket_indices[pos_i + 1:]:
+                if j in assigned:
+                    continue
+                set_j = ng_sets[j]
+                inter = len(set_i & set_j)
+                union = len(set_i | set_j)
+                if union > 0 and inter / union > 0.6:
+                    cluster.append(j)
+                    assigned.add(j)
+            clusters.append(cluster)
+            assigned.add(i)
 
     # ── Step 5: Build suggestion per cluster (representative = highest count) ──
     suggestions = []
