@@ -1,3 +1,8 @@
+---
+name: test-cli
+description: Quick smoke test for cc-sessions commands
+---
+
 Quick smoke test for cc-sessions commands.
 
 ```bash

@@ -1,9 +1,6 @@
 ---
-skill_name: tech:clean-worktree
-version: 1.0.0
+name: clean-worktree
 description: Clean stale worktrees (pruned, merged, or orphaned branches)
-author: Claude Code
-tags: [git, worktree, cleanup, maintenance]
 ---
 
 # Clean Worktrees Skill

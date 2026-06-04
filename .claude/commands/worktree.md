@@ -1,6 +1,8 @@
 ---
+name: worktree
+description: Create an isolated git worktree with instant feedback and background type check
 model: haiku
-description: Git Worktree Setup (Optimized)
+argument-hint: "<branch-name> [--fast|--skip-install|--isolated]"
 ---
 
 # Git Worktree Setup (Optimized)

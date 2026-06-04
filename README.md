@@ -4,6 +4,16 @@ Fast CLI to search, browse and analyze Claude Code session history.
 
 Claude Code stores all conversation history locally in `~/.claude/projects/` as JSONL files. `cc-sessions` indexes those files for fast search and provides a clean interface to find, browse, and resume past sessions — plus a `discover` subcommand that analyzes recurring patterns to suggest what to extract as skills, commands, or CLAUDE.md rules.
 
+## StarMapper
+
+<a href="https://starmapper.bruniaux.com/FlorianBruniaux/cc-sessions">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://starmapper.bruniaux.com/api/map-image/FlorianBruniaux/cc-sessions?theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://starmapper.bruniaux.com/api/map-image/FlorianBruniaux/cc-sessions?theme=light" />
+    <img alt="StarMapper — see who stars this repo on a world map" src="https://starmapper.bruniaux.com/api/map-image/FlorianBruniaux/cc-sessions" />
+  </picture>
+</a>
+
 ## Install
 
 ```bash

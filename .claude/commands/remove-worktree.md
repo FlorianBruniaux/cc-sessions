@@ -1,9 +1,7 @@
 ---
-skill_name: tech:remove-worktree
-version: 1.0.0
+name: remove-worktree
 description: Remove a specific worktree cleanly (directory + git reference + branch)
-author: Claude Code
-tags: [git, worktree, cleanup]
+argument-hint: "<branch-name>"
 ---
 
 # Remove Worktree

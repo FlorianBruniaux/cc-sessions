@@ -1,3 +1,8 @@
+---
+name: install-local
+description: Install cc-sessions locally for live testing
+---
+
 Install cc-sessions locally for live testing.
 
 ```bash

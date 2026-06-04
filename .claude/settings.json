@@ -12,7 +12,12 @@
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "command": ".claude/hooks/pre-tool-security.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-tool-security.sh"
+          }
+        ]
       }
     ]
   }

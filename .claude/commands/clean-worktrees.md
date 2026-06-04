@@ -1,9 +1,7 @@
 ---
-skill_name: tech:clean-worktrees
-version: 1.0.0
+name: clean-worktrees
 description: Automatically clean all stale worktrees (pruned refs + merged branches)
-author: Claude Code
-tags: [git, worktree, cleanup, automation]
+argument-hint: "[--dry-run]"
 ---
 
 # Clean Worktrees (Automatic)

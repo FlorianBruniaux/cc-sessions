@@ -151,7 +151,7 @@ def parse_duration(duration_str: str) -> datetime:
 
 def encode_project_path(path: Path) -> str:
     """Encode project path to match Claude's format."""
-    return str(path).replace('/', '-')  # Keep leading - from root /
+    return str(path).replace('\\', '/').replace('/', '-')
 
 
 def detect_project() -> Optional[str]:
@@ -181,8 +181,10 @@ def get_project_dirs(all_projects: bool = False) -> List[Path]:
     base = CLAUDE_DIR / "projects" / current
     dirs.append(base)
 
-    # Include worktrees (glob pattern: --worktrees*)
-    worktrees = list(base.parent.glob(f"{current}--worktrees*"))
+    # Include worktrees — use iterdir+startswith instead of glob to avoid
+    # pathlib raising NotImplementedError on Windows for absolute-looking patterns
+    worktrees = [d for d in base.parent.iterdir()
+                 if d.is_dir() and d.name.startswith(f"{current}--worktrees")]
     dirs.extend(worktrees)
 
     return dirs

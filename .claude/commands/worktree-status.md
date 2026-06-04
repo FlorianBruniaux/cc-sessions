@@ -1,6 +1,8 @@
 ---
+name: worktree-status
+description: Check the status of background type check for a git worktree
 model: haiku
-description: Worktree Status Check
+argument-hint: "<branch-name>"
 ---
 
 # Worktree Status Check
