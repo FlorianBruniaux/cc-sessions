@@ -167,13 +167,20 @@ The categorization threshold is built into the scoring:
 
 **Index**: `~/.claude/sessions-index.jsonl` (~280 bytes/session). Discover uses a separate `~/.claude/discover-cache.jsonl` to avoid re-reading unchanged files.
 
-## Related tools
-
-- [claude-history](https://github.com/...) (Rust) — fuzzy search with fzf
-- [cclog](https://github.com/...) (Go) — JSONL → HTML/Markdown + TUI
-- [fast-resume](https://github.com/...) (Rust) — Tantivy index + TUI
-
 `cc-sessions` positioning: Unix-style CLI, powerful filters, zero dependencies (Python stdlib only).
+
+<!-- BEGIN GENERATED RELATED PROJECTS -->
+<!-- Source: https://github.com/FlorianBruniaux/FlorianBruniaux/blob/main/ecosystem/projects.json; project: cc-sessions -->
+## Explore the ecosystem
+
+These projects extend the workflow without duplicating this tool:
+
+- **Visualize with [CCBoard](https://github.com/FlorianBruniaux/ccboard)**: switch to a complete dashboard when targeted CLI search is not enough.
+- **Analyze with [cc-skill-usage](https://github.com/FlorianBruniaux/cc-skill-usage)**: inspect one specialist signal in the same local transcripts.
+- **Learn with [Claude Code Ultimate Guide](https://github.com/FlorianBruniaux/claude-code-ultimate-guide)**: go deeper on sessions, memory, and context continuity.
+
+[Browse the complete open-source galaxy](https://github.com/FlorianBruniaux#open-source-galaxy)
+<!-- END GENERATED RELATED PROJECTS -->
 
 ## Autoresearch loops
 
